@@ -2,6 +2,7 @@ import { Inngest } from "inngest";
 import User from "../models/User.js";
 import Booking from "../models/Booking.js";
 import Show from "../models/Show.js";
+import sendEmail from "../configs/nodeMailer.js";
 
 export const inngest = new Inngest({ id: "movie-ticket-booking" });
 
@@ -36,7 +37,9 @@ const syncUserDeletion = inngest.createFunction(
   },
   async ({ event }) => {
     const { id } = event.data;
+
     await User.findByIdAndDelete(id);
+
     return { success: true };
   }
 );
@@ -71,12 +74,11 @@ const releaseSeatsAndDeleteBooking = inngest.createFunction(
     triggers: [{ event: "app/checkpayment" }],
   },
   async ({ event, step }) => {
-    const tenMinutesLater = new Date(Date.now() + 10 * 60 * 1000);
-
-    await step.sleepUntil("wait-for-10-minutes", tenMinutesLater);
+    await step.sleep("wait-for-10-minutes", "10m");
 
     await step.run("check-payment-status", async () => {
-      const bookingId = event.data.bookingId;
+      const { bookingId } = event.data;
+
       const booking = await Booking.findById(bookingId);
 
       if (!booking) return;
@@ -91,10 +93,58 @@ const releaseSeatsAndDeleteBooking = inngest.createFunction(
         });
 
         show.markModified("occupiedSeats");
-        await show.save();
 
+        await show.save();
         await Booking.findByIdAndDelete(booking._id);
       }
+    });
+
+    return { success: true };
+  }
+);
+
+const sendBookingConfirmationEmail = inngest.createFunction(
+  {
+    id: "send-booking-confirmation-email",
+    triggers: [{ event: "app/show.booked" }],
+  },
+  async ({ event, step }) => {
+    const { bookingId } = event.data;
+
+    const booking = await Booking.findById(bookingId)
+      .populate({
+        path: "show",
+        populate: {
+          path: "movie",
+          model: "Movie",
+        },
+      })
+      .populate("user");
+
+    await sendEmail({
+      to: booking.user.email,
+      subject: `Payment confirmation: "${booking.show.movie.title}" booked! `,
+      body: `<div style="font-family: Arial, sans-serif; line-height: 1.5;">
+                  <h2>Hi ${booking.user.name},</h2>
+                  <p>Your booking for <strong style="color: #F84565;">"${booking.show.movie.title}"</strong> is confirmed.</p>
+                  <p>
+                    <strong>Date:</strong> ${new Date(booking.show.showDateTime).toLocaleDateString('en-US', {timeZone: 'Asia/Kolkata'})}<br/>
+                    <strong>Time:</strong> ${new Date(booking.show.showDateTime).toLocaleTimeString('en-US', {timeZone: 'Asia/Kolkata'})}
+                  </p>
+                  <p>Enjoy the show!</p>
+                  <p>Thanks for booking with us!<br/>- QuickShow Team</p>
+               </div>`
+    })
+
+    if (!booking) {
+      return { success: false, message: "Booking not found" };
+    }
+
+    await step.run("send-email", async () => {
+      console.log("Booking confirmation email function running...");
+      console.log("Booking ID:", booking._id);
+      console.log("User Email:", booking.user?.email);
+      console.log("Movie:", booking.show?.movie?.title);
     });
 
     return { success: true };
@@ -106,4 +156,5 @@ export const functions = [
   syncUserDeletion,
   syncUserUpdation,
   releaseSeatsAndDeleteBooking,
+  sendBookingConfirmationEmail,
 ];
